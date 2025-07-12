@@ -1,0 +1,1 @@
+"""Trading strategies module for MCP Backtest"""
