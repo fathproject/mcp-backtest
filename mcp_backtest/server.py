@@ -5,6 +5,7 @@ Main MCP Server for backtesting
 import asyncio
 import json
 import logging
+import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 from pathlib import Path
@@ -53,70 +54,28 @@ class MCPBacktestServer:
     def _setup_tools(self):
         """Setup MCP tools"""
         
+        # Import strategy generator
+        from .strategies.generator import StrategyGenerator
+        self.strategy_generator = StrategyGenerator(self.llm_manager)
+        
         # Tool for running backtest with CSV data
         @self.server.list_tools()
         async def list_tools() -> List[Tool]:
             return [
                 Tool(
-                    name="run_backtest_csv",
-                    description="Run backtest with CSV data",
+                    name="smart_backtest",
+                    description="Smart backtesting with data source and trading prompt. MCP will intelligently parse data and generate strategy.",
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "csv_path": {"type": "string", "description": "Path to CSV file"},
-                            "symbol": {"type": "string", "description": "Trading symbol"},
-                            "market_type": {"type": "string", "enum": ["crypto", "stock", "forex"]},
-                            "strategy_name": {"type": "string", "description": "Strategy name"},
-                            "strategy_params": {"type": "object", "description": "Strategy parameters"},
-                            "llm_provider": {"type": "string", "enum": ["openai", "gemini", "claude", "cloudflare", "qwen", "deepseek"]},
-                            "llm_model": {"type": "string", "description": "LLM model name"},
+                            "data_source": {"type": "string", "description": "Path to CSV file, JSON file, or API endpoint URL"},
+                            "trading_prompt": {"type": "string", "description": "Describe your trading strategy requirements, goals, and preferences"},
+                            "llm_provider": {"type": "string", "enum": ["openai", "gemini", "claude", "cloudflare", "qwen", "deepseek"], "default": "openai"},
+                            "llm_model": {"type": "string", "description": "LLM model name", "default": "gpt-3.5-turbo"},
                             "initial_capital": {"type": "number", "description": "Initial capital", "default": 10000},
-                            "commission": {"type": "number", "description": "Commission rate", "default": 0.001},
-                            "analysis_requirements": {"type": "array", "items": {"type": "string"}, "description": "Analysis requirements"}
+                            "commission": {"type": "number", "description": "Commission rate", "default": 0.001}
                         },
-                        "required": ["csv_path", "symbol", "market_type", "strategy_name", "llm_provider", "llm_model"]
-                    }
-                ),
-                Tool(
-                    name="run_backtest_json",
-                    description="Run backtest with JSON data",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "json_path": {"type": "string", "description": "Path to JSON file"},
-                            "symbol": {"type": "string", "description": "Trading symbol"},
-                            "market_type": {"type": "string", "enum": ["crypto", "stock", "forex"]},
-                            "strategy_name": {"type": "string", "description": "Strategy name"},
-                            "strategy_params": {"type": "object", "description": "Strategy parameters"},
-                            "llm_provider": {"type": "string", "enum": ["openai", "gemini", "claude", "cloudflare", "qwen", "deepseek"]},
-                            "llm_model": {"type": "string", "description": "LLM model name"},
-                            "initial_capital": {"type": "number", "description": "Initial capital", "default": 10000},
-                            "commission": {"type": "number", "description": "Commission rate", "default": 0.001},
-                            "analysis_requirements": {"type": "array", "items": {"type": "string"}, "description": "Analysis requirements"}
-                        },
-                        "required": ["json_path", "symbol", "market_type", "strategy_name", "llm_provider", "llm_model"]
-                    }
-                ),
-                Tool(
-                    name="run_backtest_api",
-                    description="Run backtest with API data",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {
-                            "api_endpoint": {"type": "string", "description": "API endpoint URL"},
-                            "api_headers": {"type": "object", "description": "API headers"},
-                            "api_params": {"type": "object", "description": "API parameters"},
-                            "symbol": {"type": "string", "description": "Trading symbol"},
-                            "market_type": {"type": "string", "enum": ["crypto", "stock", "forex"]},
-                            "strategy_name": {"type": "string", "description": "Strategy name"},
-                            "strategy_params": {"type": "object", "description": "Strategy parameters"},
-                            "llm_provider": {"type": "string", "enum": ["openai", "gemini", "claude", "cloudflare", "qwen", "deepseek"]},
-                            "llm_model": {"type": "string", "description": "LLM model name"},
-                            "initial_capital": {"type": "number", "description": "Initial capital", "default": 10000},
-                            "commission": {"type": "number", "description": "Commission rate", "default": 0.001},
-                            "analysis_requirements": {"type": "array", "items": {"type": "string"}, "description": "Analysis requirements"}
-                        },
-                        "required": ["api_endpoint", "symbol", "market_type", "strategy_name", "llm_provider", "llm_model"]
+                        "required": ["data_source", "trading_prompt"]
                     }
                 ),
                 Tool(
@@ -131,28 +90,17 @@ class MCPBacktestServer:
                     }
                 ),
                 Tool(
-                    name="list_strategies",
-                    description="List available trading strategies",
-                    inputSchema={
-                        "type": "object",
-                        "properties": {}
-                    }
-                ),
-                Tool(
-                    name="analyze_market_data",
-                    description="Analyze market data using LLM",
+                    name="analyze_data",
+                    description="Analyze market data from any source with intelligent parsing",
                     inputSchema={
                         "type": "object",
                         "properties": {
-                            "data_path": {"type": "string", "description": "Path to data file"},
-                            "data_format": {"type": "string", "enum": ["csv", "json"]},
-                            "market_type": {"type": "string", "enum": ["crypto", "stock", "forex"]},
-                            "symbol": {"type": "string", "description": "Trading symbol"},
-                            "llm_provider": {"type": "string", "enum": ["openai", "gemini", "claude", "cloudflare", "qwen", "deepseek"]},
-                            "llm_model": {"type": "string", "description": "LLM model name"},
-                            "context": {"type": "string", "description": "Analysis context"}
+                            "data_source": {"type": "string", "description": "Path to CSV file, JSON file, or API endpoint URL"},
+                            "analysis_prompt": {"type": "string", "description": "What specific analysis do you want? (trends, patterns, risks, etc.)"},
+                            "llm_provider": {"type": "string", "enum": ["openai", "gemini", "claude", "cloudflare", "qwen", "deepseek"], "default": "openai"},
+                            "llm_model": {"type": "string", "description": "LLM model name", "default": "gpt-3.5-turbo"}
                         },
-                        "required": ["data_path", "data_format", "market_type", "symbol", "llm_provider", "llm_model"]
+                        "required": ["data_source", "analysis_prompt"]
                     }
                 )
             ]
@@ -164,208 +112,120 @@ class MCPBacktestServer:
         async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             """Handle tool calls"""
             try:
-                if name == "run_backtest_csv":
-                    return await self._run_backtest_csv(arguments)
-                elif name == "run_backtest_json":
-                    return await self._run_backtest_json(arguments)
-                elif name == "run_backtest_api":
-                    return await self._run_backtest_api(arguments)
+                if name == "smart_backtest":
+                    return await self._smart_backtest(arguments)
                 elif name == "get_backtest_results":
                     return await self._get_backtest_results(arguments)
-                elif name == "list_strategies":
-                    return await self._list_strategies()
-                elif name == "analyze_market_data":
-                    return await self._analyze_market_data(arguments)
+                elif name == "analyze_data":
+                    return await self._analyze_data(arguments)
                 else:
                     return [TextContent(type="text", text=f"Unknown tool: {name}")]
             except Exception as e:
                 logger.error(f"Error in tool {name}: {str(e)}")
                 return [TextContent(type="text", text=f"Error: {str(e)}")]
     
-    async def _run_backtest_csv(self, args: Dict[str, Any]) -> List[TextContent]:
-        """Run backtest with CSV data"""
+    async def _smart_backtest(self, args: Dict[str, Any]) -> List[TextContent]:
+        """Smart backtesting with intelligent data parsing and strategy generation"""
         try:
-            # Create data source config
-            data_source = DataSourceConfig(
-                source_type=DataFormat.CSV,
-                source_path=args["csv_path"]
-            )
+            # Step 1: Load and parse data intelligently
+            data_source = args["data_source"]
+            df, metadata = self.data_handler.load_data(data_source)
             
-            # Create strategy config
-            strategy_config = StrategyConfig(
-                strategy_name=args["strategy_name"],
-                parameters=args.get("strategy_params", {}),
-                risk_management={}
-            )
+            # Step 2: Detect market information
+            market_info = self.data_handler.detect_market_info(df, metadata)
             
-            # Create LLM config
+            # Step 3: Create market data object
+            market_data = self._create_market_data(df, market_info, metadata)
+            
+            # Step 4: Create LLM config with defaults
             llm_config = LLMConfig(
-                provider=LLMProvider(args["llm_provider"]),
-                model_name=args["llm_model"]
+                provider=LLMProvider(args.get("llm_provider", "openai")),
+                model_name=args.get("llm_model", "gpt-3.5-turbo")
             )
             
-            # Create backtest config
-            backtest_config = BacktestConfig(
-                initial_capital=args.get("initial_capital", 10000),
-                commission=args.get("commission", 0.001)
+            # Step 5: Generate strategy from user prompt
+            strategy_impl = await self.strategy_generator.generate_strategy_from_prompt(
+                market_data, args["trading_prompt"], llm_config
             )
             
-            # Create request
-            request = BacktestRequest(
-                data_source=data_source,
-                market_type=MarketType(args["market_type"]),
-                strategy=strategy_config,
-                backtest_config=backtest_config,
-                llm_config=llm_config,
-                analysis_requirements=args.get("analysis_requirements", [])
+            # Step 6: Run backtest with generated strategy
+            result = await self._execute_smart_backtest(
+                market_data, 
+                strategy_impl, 
+                llm_config,
+                args.get("initial_capital", 10000),
+                args.get("commission", 0.001)
             )
             
-            # Run backtest
-            result = await self._execute_backtest(request, args["symbol"])
-            
-            # Store result
+            # Step 7: Store result
             self.results_storage[result.test_id] = result
             
             return [TextContent(
                 type="text",
-                text=f"Backtest completed successfully!\n\n"
-                     f"Test ID: {result.test_id}\n"
-                     f"Total Return: {result.metrics.get('total_return', 0)*100:.2f}%\n"
-                     f"Sharpe Ratio: {result.metrics.get('sharpe_ratio', 0):.2f}\n"
-                     f"Max Drawdown: {result.metrics.get('max_drawdown', 0)*100:.2f}%\n"
-                     f"Total Trades: {result.metrics.get('total_trades', 0)}\n"
-                     f"Win Rate: {result.metrics.get('win_rate', 0)*100:.2f}%\n\n"
-                     f"Analysis:\n{result.analysis}\n\n"
-                     f"Result Matrix:\n{json.dumps(result.result_matrix, indent=2)}"
+                text=f"🚀 Smart Backtest Completed Successfully!\n\n"
+                     f"📊 Data Analysis:\n"
+                     f"- Source: {data_source}\n"
+                     f"- Market Type: {market_info.get('market_type', 'unknown').title()}\n"
+                     f"- Data Points: {len(df)}\n"
+                     f"- Date Range: {metadata.get('date_range', {}).get('start', 'N/A')} to {metadata.get('date_range', {}).get('end', 'N/A')}\n\n"
+                     f"🤖 AI Generated Strategy:\n"
+                     f"- Strategy: {strategy_impl.get('strategy_name', 'Custom Strategy')}\n"
+                     f"- Description: {strategy_impl.get('description', 'AI-generated strategy')}\n\n"
+                     f"📈 Backtest Results:\n"
+                     f"- Test ID: {result.test_id}\n"
+                     f"- Total Return: {result.metrics.get('total_return', 0)*100:.2f}%\n"
+                     f"- Sharpe Ratio: {result.metrics.get('sharpe_ratio', 0):.2f}\n"
+                     f"- Max Drawdown: {result.metrics.get('max_drawdown', 0)*100:.2f}%\n"
+                     f"- Total Trades: {result.metrics.get('total_trades', 0)}\n"
+                     f"- Win Rate: {result.metrics.get('win_rate', 0)*100:.2f}%\n\n"
+                     f"🔍 AI Analysis:\n{result.analysis}\n\n"
+                     f"📋 Comprehensive Results:\n{json.dumps(result.result_matrix, indent=2)}"
             )]
             
         except Exception as e:
-            logger.error(f"Error in CSV backtest: {str(e)}")
-            return [TextContent(type="text", text=f"Error running backtest: {str(e)}")]
+            logger.error(f"Error in smart backtest: {str(e)}")
+            return [TextContent(type="text", text=f"Error running smart backtest: {str(e)}")]
     
-    async def _run_backtest_json(self, args: Dict[str, Any]) -> List[TextContent]:
-        """Run backtest with JSON data"""
+    async def _analyze_data(self, args: Dict[str, Any]) -> List[TextContent]:
+        """Analyze market data with intelligent parsing"""
         try:
-            # Create data source config
-            data_source = DataSourceConfig(
-                source_type=DataFormat.JSON,
-                source_path=args["json_path"]
-            )
+            # Step 1: Load and parse data intelligently
+            data_source = args["data_source"]
+            df, metadata = self.data_handler.load_data(data_source)
             
-            # Create strategy config
-            strategy_config = StrategyConfig(
-                strategy_name=args["strategy_name"],
-                parameters=args.get("strategy_params", {}),
-                risk_management={}
-            )
+            # Step 2: Detect market information
+            market_info = self.data_handler.detect_market_info(df, metadata)
             
-            # Create LLM config
+            # Step 3: Create market data object
+            market_data = self._create_market_data(df, market_info, metadata)
+            
+            # Step 4: Create LLM config
             llm_config = LLMConfig(
-                provider=LLMProvider(args["llm_provider"]),
-                model_name=args["llm_model"]
+                provider=LLMProvider(args.get("llm_provider", "openai")),
+                model_name=args.get("llm_model", "gpt-3.5-turbo")
             )
             
-            # Create backtest config
-            backtest_config = BacktestConfig(
-                initial_capital=args.get("initial_capital", 10000),
-                commission=args.get("commission", 0.001)
-            )
-            
-            # Create request
-            request = BacktestRequest(
-                data_source=data_source,
-                market_type=MarketType(args["market_type"]),
-                strategy=strategy_config,
-                backtest_config=backtest_config,
-                llm_config=llm_config,
-                analysis_requirements=args.get("analysis_requirements", [])
-            )
-            
-            # Run backtest
-            result = await self._execute_backtest(request, args["symbol"])
-            
-            # Store result
-            self.results_storage[result.test_id] = result
+            # Step 5: Get LLM provider and analyze
+            llm_provider = self.llm_manager.get_provider(llm_config.provider, llm_config)
+            analysis = await llm_provider.generate_analysis(market_data, args["analysis_prompt"])
             
             return [TextContent(
                 type="text",
-                text=f"Backtest completed successfully!\n\n"
-                     f"Test ID: {result.test_id}\n"
-                     f"Total Return: {result.metrics.get('total_return', 0)*100:.2f}%\n"
-                     f"Sharpe Ratio: {result.metrics.get('sharpe_ratio', 0):.2f}\n"
-                     f"Max Drawdown: {result.metrics.get('max_drawdown', 0)*100:.2f}%\n"
-                     f"Total Trades: {result.metrics.get('total_trades', 0)}\n"
-                     f"Win Rate: {result.metrics.get('win_rate', 0)*100:.2f}%\n\n"
-                     f"Analysis:\n{result.analysis}\n\n"
-                     f"Result Matrix:\n{json.dumps(result.result_matrix, indent=2)}"
+                text=f"📊 Data Analysis Complete!\n\n"
+                     f"📈 Data Overview:\n"
+                     f"- Source: {data_source}\n"
+                     f"- Market Type: {market_info.get('market_type', 'unknown').title()}\n"
+                     f"- Data Points: {len(df)}\n"
+                     f"- Date Range: {metadata.get('date_range', {}).get('start', 'N/A')} to {metadata.get('date_range', {}).get('end', 'N/A')}\n"
+                     f"- Columns: {', '.join(df.columns)}\n"
+                     f"- Has Headers: {metadata.get('had_header', 'N/A')}\n\n"
+                     f"🤖 AI Analysis:\n{analysis}\n\n"
+                     f"📋 Data Statistics:\n{json.dumps(market_info.get('characteristics', {}), indent=2)}"
             )]
             
         except Exception as e:
-            logger.error(f"Error in JSON backtest: {str(e)}")
-            return [TextContent(type="text", text=f"Error running backtest: {str(e)}")]
-    
-    async def _run_backtest_api(self, args: Dict[str, Any]) -> List[TextContent]:
-        """Run backtest with API data"""
-        try:
-            # Create data source config
-            data_source = DataSourceConfig(
-                source_type=DataFormat.API,
-                api_endpoint=args["api_endpoint"],
-                api_headers=args.get("api_headers", {}),
-                api_params=args.get("api_params", {})
-            )
-            
-            # Create strategy config
-            strategy_config = StrategyConfig(
-                strategy_name=args["strategy_name"],
-                parameters=args.get("strategy_params", {}),
-                risk_management={}
-            )
-            
-            # Create LLM config
-            llm_config = LLMConfig(
-                provider=LLMProvider(args["llm_provider"]),
-                model_name=args["llm_model"]
-            )
-            
-            # Create backtest config
-            backtest_config = BacktestConfig(
-                initial_capital=args.get("initial_capital", 10000),
-                commission=args.get("commission", 0.001)
-            )
-            
-            # Create request
-            request = BacktestRequest(
-                data_source=data_source,
-                market_type=MarketType(args["market_type"]),
-                strategy=strategy_config,
-                backtest_config=backtest_config,
-                llm_config=llm_config,
-                analysis_requirements=args.get("analysis_requirements", [])
-            )
-            
-            # Run backtest
-            result = await self._execute_backtest(request, args["symbol"])
-            
-            # Store result
-            self.results_storage[result.test_id] = result
-            
-            return [TextContent(
-                type="text",
-                text=f"Backtest completed successfully!\n\n"
-                     f"Test ID: {result.test_id}\n"
-                     f"Total Return: {result.metrics.get('total_return', 0)*100:.2f}%\n"
-                     f"Sharpe Ratio: {result.metrics.get('sharpe_ratio', 0):.2f}\n"
-                     f"Max Drawdown: {result.metrics.get('max_drawdown', 0)*100:.2f}%\n"
-                     f"Total Trades: {result.metrics.get('total_trades', 0)}\n"
-                     f"Win Rate: {result.metrics.get('win_rate', 0)*100:.2f}%\n\n"
-                     f"Analysis:\n{result.analysis}\n\n"
-                     f"Result Matrix:\n{json.dumps(result.result_matrix, indent=2)}"
-            )]
-            
-        except Exception as e:
-            logger.error(f"Error in API backtest: {str(e)}")
-            return [TextContent(type="text", text=f"Error running backtest: {str(e)}")]
+            logger.error(f"Error in data analysis: {str(e)}")
+            return [TextContent(type="text", text=f"Error analyzing data: {str(e)}")]
     
     async def _get_backtest_results(self, args: Dict[str, Any]) -> List[TextContent]:
         """Get backtest results by test ID"""
@@ -378,118 +238,85 @@ class MCPBacktestServer:
         
         return [TextContent(
             type="text",
-            text=f"Backtest Results for {test_id}\n\n"
-                 f"Strategy: {result.request.strategy.strategy_name}\n"
-                 f"Market: {result.request.market_type}\n"
-                 f"Created: {result.created_at}\n\n"
-                 f"Performance Metrics:\n"
-                 f"Total Return: {result.metrics.get('total_return', 0)*100:.2f}%\n"
-                 f"Annualized Return: {result.metrics.get('annualized_return', 0)*100:.2f}%\n"
-                 f"Volatility: {result.metrics.get('volatility', 0)*100:.2f}%\n"
-                 f"Sharpe Ratio: {result.metrics.get('sharpe_ratio', 0):.2f}\n"
-                 f"Max Drawdown: {result.metrics.get('max_drawdown', 0)*100:.2f}%\n"
-                 f"Total Trades: {result.metrics.get('total_trades', 0)}\n"
-                 f"Win Rate: {result.metrics.get('win_rate', 0)*100:.2f}%\n"
-                 f"Profit Factor: {result.metrics.get('profit_factor', 0):.2f}\n\n"
-                 f"Analysis:\n{result.analysis}\n\n"
-                 f"Result Matrix:\n{json.dumps(result.result_matrix, indent=2)}"
+            text=f"📊 Backtest Results for {test_id}\n\n"
+                 f"🎯 Strategy: {result.request.strategy.strategy_name if hasattr(result, 'request') else 'AI Generated'}\n"
+                 f"📈 Market: {result.request.market_type if hasattr(result, 'request') else 'Auto-detected'}\n"
+                 f"📅 Created: {result.created_at}\n\n"
+                 f"📊 Performance Metrics:\n"
+                 f"- Total Return: {result.metrics.get('total_return', 0)*100:.2f}%\n"
+                 f"- Annualized Return: {result.metrics.get('annualized_return', 0)*100:.2f}%\n"
+                 f"- Volatility: {result.metrics.get('volatility', 0)*100:.2f}%\n"
+                 f"- Sharpe Ratio: {result.metrics.get('sharpe_ratio', 0):.2f}\n"
+                 f"- Max Drawdown: {result.metrics.get('max_drawdown', 0)*100:.2f}%\n"
+                 f"- Total Trades: {result.metrics.get('total_trades', 0)}\n"
+                 f"- Win Rate: {result.metrics.get('win_rate', 0)*100:.2f}%\n"
+                 f"- Profit Factor: {result.metrics.get('profit_factor', 0):.2f}\n\n"
+                 f"🤖 AI Analysis:\n{result.analysis}\n\n"
+                 f"📋 Comprehensive Results:\n{json.dumps(result.result_matrix, indent=2)}"
         )]
     
-    async def _list_strategies(self) -> List[TextContent]:
-        """List available strategies"""
-        strategies = self.strategy_manager.list_strategies()
+    def _create_market_data(self, df: pd.DataFrame, market_info: Dict[str, Any], metadata: Dict[str, Any]):
+        """Create MarketData object from DataFrame"""
+        from .core.models import MarketData, MarketType
         
-        strategy_descriptions = {
-            'buy_and_hold': 'Simple buy and hold strategy',
-            'moving_average_crossover': 'Moving average crossover strategy',
-            'rsi': 'RSI (Relative Strength Index) strategy',
-            'mean_reversion': 'Mean reversion strategy using Bollinger Bands',
-            'momentum': 'Momentum strategy based on price momentum'
+        # Convert market type string to enum
+        market_type_map = {
+            'crypto': MarketType.CRYPTO,
+            'stock': MarketType.STOCK,
+            'forex': MarketType.FOREX,
+            'unknown': MarketType.CRYPTO  # Default to crypto
         }
         
-        text = "Available Trading Strategies:\n\n"
-        for strategy in strategies:
-            description = strategy_descriptions.get(strategy, 'No description available')
-            text += f"• {strategy}: {description}\n"
+        market_type = market_type_map.get(market_info.get('market_type', 'unknown'), MarketType.CRYPTO)
         
-        return [TextContent(type="text", text=text)]
+        return MarketData(
+            symbol=market_info.get('symbol', 'UNKNOWN'),
+            market_type=market_type,
+            data=df,
+            metadata=metadata
+        )
     
-    async def _analyze_market_data(self, args: Dict[str, Any]) -> List[TextContent]:
-        """Analyze market data using LLM"""
-        try:
-            # Load market data
-            data_source = DataSourceConfig(
-                source_type=DataFormat(args["data_format"]),
-                source_path=args["data_path"]
-            )
-            
-            market_data = await self.data_handler.load_data(
-                data_source, 
-                MarketType(args["market_type"]), 
-                args["symbol"]
-            )
-            
-            # Setup LLM
-            llm_config = LLMConfig(
-                provider=LLMProvider(args["llm_provider"]),
-                model_name=args["llm_model"]
-            )
-            
-            self.llm_manager.add_provider(llm_config)
-            
-            # Generate analysis
-            context = args.get("context", "General market analysis")
-            analysis = await self.llm_manager.generate_analysis(
-                llm_config.provider, 
-                market_data, 
-                context
-            )
-            
-            return [TextContent(
-                type="text",
-                text=f"Market Analysis for {args['symbol']} ({args['market_type']})\n\n"
-                     f"Data Period: {market_data.data[0].timestamp} to {market_data.data[-1].timestamp}\n"
-                     f"Data Points: {len(market_data.data)}\n\n"
-                     f"Analysis:\n{analysis}"
-            )]
-            
-        except Exception as e:
-            logger.error(f"Error in market analysis: {str(e)}")
-            return [TextContent(type="text", text=f"Error analyzing market data: {str(e)}")]
-    
-    async def _execute_backtest(self, request: BacktestRequest, symbol: str) -> BacktestResult:
-        """Execute complete backtest"""
+    async def _execute_smart_backtest(
+        self, 
+        market_data, 
+        strategy_impl: Dict[str, Any], 
+        llm_config: LLMConfig,
+        initial_capital: float,
+        commission: float
+    ):
+        """Execute backtest with AI-generated strategy"""
+        from .core.models import BacktestRequest, StrategyConfig, BacktestConfig, DataSourceConfig, DataFormat
         
-        # Load market data
-        market_data = await self.data_handler.load_data(
-            request.data_source, 
-            request.market_type, 
-            symbol
+        # Create configs
+        data_source = DataSourceConfig(
+            source_type=DataFormat.CSV,  # Will be overridden by the engine
+            source_path="dynamic"
         )
         
-        # Validate and preprocess data
-        if not self.data_handler.validate_data(market_data):
-            raise ValueError("Invalid market data")
-        
-        market_data = self.data_handler.preprocess_data(market_data)
-        
-        # Get strategy and generate signals
-        strategy = self.strategy_manager.get_strategy(request.strategy)
-        signals = await strategy.generate_signals(market_data)
-        
-        # Run backtest
-        engine = BacktestEngine(request.backtest_config)
-        result = await engine.run_backtest(request, market_data, signals)
-        
-        # Setup LLM and generate analysis
-        self.llm_manager.add_provider(request.llm_config)
-        analysis = await self.llm_manager.analyze_results(
-            request.llm_config.provider, 
-            result
+        strategy_config = StrategyConfig(
+            strategy_name=strategy_impl["strategy_name"],
+            parameters=strategy_impl.get("parameters", {}),
+            risk_management={}
         )
         
-        # Update result with analysis
-        result.analysis = analysis
+        backtest_config = BacktestConfig(
+            initial_capital=initial_capital,
+            commission=commission
+        )
+        
+        # Create request
+        request = BacktestRequest(
+            data_source=data_source,
+            market_type=market_data.market_type,
+            strategy=strategy_config,
+            backtest_config=backtest_config,
+            llm_config=llm_config,
+            analysis_requirements=[]
+        )
+        
+        # Execute backtest with the engine
+        engine = BacktestEngine()
+        result = await engine.run_backtest(request, market_data)
         
         return result
     
