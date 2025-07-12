@@ -3,7 +3,7 @@ Configuration management for MCP Backtest
 """
 
 import os
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from pathlib import Path
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -54,6 +54,27 @@ class LLMProviderConfig(BaseModel):
     deepseek_model: str = "deepseek-chat"
 
 
+class MetaAPIConfig(BaseModel):
+    """MetaAPI configuration for live trading"""
+    api_key: Optional[str] = None
+    account_id: Optional[str] = None
+    region: str = "new-york"  # or 'london', 'singapore'
+    platform: str = "mt4"  # or 'mt5'
+    
+    # Trading settings
+    risk_limit: float = 0.02  # 2% risk per trade
+    max_positions: int = 10
+    max_daily_loss: float = 0.05  # 5% daily loss limit
+    
+    # Connection settings
+    timeout: int = 30  # seconds
+    retry_attempts: int = 3
+    
+    # Real-time data streaming
+    stream_enabled: bool = True
+    stream_symbols: List[str] = []  # symbols to stream
+
+
 class BacktestDefaults(BaseModel):
     """Default backtest configuration"""
     initial_capital: float = 10000.0
@@ -99,6 +120,7 @@ class Config(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     api: APIConfig = Field(default_factory=APIConfig)
     llm_providers: LLMProviderConfig = Field(default_factory=LLMProviderConfig)
+    metaapi: MetaAPIConfig = Field(default_factory=MetaAPIConfig)
     backtest_defaults: BacktestDefaults = Field(default_factory=BacktestDefaults)
     strategy_defaults: StrategyDefaults = Field(default_factory=StrategyDefaults)
     
@@ -125,6 +147,12 @@ class Config(BaseModel):
         config.llm_providers.cloudflare_account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID")
         config.llm_providers.qwen_api_key = os.getenv("QWEN_API_KEY")
         config.llm_providers.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
+        
+        # Load MetaAPI configuration
+        config.metaapi.api_key = os.getenv("METAAPI_API_KEY")
+        config.metaapi.account_id = os.getenv("METAAPI_ACCOUNT_ID")
+        config.metaapi.region = os.getenv("METAAPI_REGION", config.metaapi.region)
+        config.metaapi.platform = os.getenv("METAAPI_PLATFORM", config.metaapi.platform)
         
         # Load other environment variables
         config.database.url = os.getenv("DATABASE_URL", config.database.url)

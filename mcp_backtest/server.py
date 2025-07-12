@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import pandas as pd
+import uuid
 from datetime import datetime
 from typing import Dict, List, Any, Optional
 from pathlib import Path
@@ -29,6 +30,8 @@ from .core.backtest import BacktestEngine
 from .data.handlers import DataHandler
 from .strategies.base import StrategyManager
 from .llm.providers import LLMManager
+from .trading.live_engine import LiveTradingEngine, TradingMode
+from .trading.metaapi_client import MetaAPIClient
 
 
 # Set up logging
@@ -47,6 +50,9 @@ class MCPBacktestServer:
         
         # Storage for results
         self.results_storage: Dict[str, BacktestResult] = {}
+        
+        # Live trading sessions
+        self.trading_sessions: Dict[str, LiveTradingEngine] = {}
         
         self._setup_tools()
         self._setup_handlers()
@@ -102,6 +108,52 @@ class MCPBacktestServer:
                         },
                         "required": ["data_source", "analysis_prompt"]
                     }
+                ),
+                Tool(
+                    name="start_live_trading",
+                    description="Start live trading with MetaAPI using AI-generated strategy",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "symbols": {"type": "array", "items": {"type": "string"}, "description": "Trading symbols (e.g., EURUSD, GBPUSD)"},
+                            "trading_prompt": {"type": "string", "description": "Describe your trading strategy requirements"},
+                            "mode": {"type": "string", "enum": ["demo", "live", "paper"], "default": "demo"},
+                            "llm_provider": {"type": "string", "enum": ["openai", "gemini", "claude", "cloudflare", "qwen", "deepseek"], "default": "openai"},
+                            "llm_model": {"type": "string", "description": "LLM model name", "default": "gpt-3.5-turbo"}
+                        },
+                        "required": ["symbols", "trading_prompt"]
+                    }
+                ),
+                Tool(
+                    name="stop_live_trading",
+                    description="Stop live trading session",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "session_id": {"type": "string", "description": "Trading session ID"}
+                        },
+                        "required": ["session_id"]
+                    }
+                ),
+                Tool(
+                    name="get_trading_status",
+                    description="Get current live trading status and performance",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "session_id": {"type": "string", "description": "Trading session ID"}
+                        },
+                        "required": ["session_id"]
+                    }
+                ),
+                Tool(
+                    name="get_account_info",
+                    description="Get MetaAPI account information and balance",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }
                 )
             ]
     
@@ -118,6 +170,14 @@ class MCPBacktestServer:
                     return await self._get_backtest_results(arguments)
                 elif name == "analyze_data":
                     return await self._analyze_data(arguments)
+                elif name == "start_live_trading":
+                    return await self._start_live_trading(arguments)
+                elif name == "stop_live_trading":
+                    return await self._stop_live_trading(arguments)
+                elif name == "get_trading_status":
+                    return await self._get_trading_status(arguments)
+                elif name == "get_account_info":
+                    return await self._get_account_info(arguments)
                 else:
                     return [TextContent(type="text", text=f"Unknown tool: {name}")]
             except Exception as e:
@@ -319,6 +379,181 @@ class MCPBacktestServer:
         result = await engine.run_backtest(request, market_data)
         
         return result
+    
+    async def _start_live_trading(self, args: Dict[str, Any]) -> List[TextContent]:
+        """Start live trading with MetaAPI"""
+        try:
+            # Generate session ID
+            session_id = str(uuid.uuid4())
+            
+            # Create LLM config
+            llm_config = LLMConfig(
+                provider=LLMProvider(args.get("llm_provider", "openai")),
+                model_name=args.get("llm_model", "gpt-3.5-turbo")
+            )
+            
+            # Generate strategy from prompt
+            symbols = args["symbols"]
+            trading_prompt = args["trading_prompt"]
+            mode = TradingMode(args.get("mode", "demo"))
+            
+            # Create sample market data for strategy generation
+            # In practice, this would use real market data
+            sample_data = pd.DataFrame({
+                'open': [1.0] * 100,
+                'high': [1.1] * 100,
+                'low': [0.9] * 100,
+                'close': [1.0] * 100,
+                'volume': [1000] * 100
+            })
+            
+            # Generate strategy
+            strategy_impl = await self.strategy_generator.generate_strategy_from_prompt(
+                sample_data, trading_prompt, llm_config
+            )
+            
+            # Create strategy instance
+            strategy = self.strategy_manager.create_strategy(
+                strategy_impl.get("strategy_name", "custom"),
+                strategy_impl.get("params", {})
+            )
+            
+            # Create and start live trading engine
+            trading_engine = LiveTradingEngine(
+                strategy=strategy,
+                symbols=symbols,
+                mode=mode
+            )
+            
+            # Store session
+            self.trading_sessions[session_id] = trading_engine
+            
+            # Start trading (in background)
+            asyncio.create_task(trading_engine.start())
+            
+            return [TextContent(
+                type="text",
+                text=f"🚀 Live Trading Started Successfully!\n\n"
+                     f"📋 Session Details:\n"
+                     f"- Session ID: {session_id}\n"
+                     f"- Mode: {mode.value.upper()}\n"
+                     f"- Symbols: {', '.join(symbols)}\n"
+                     f"- Strategy: {strategy_impl.get('strategy_name', 'Custom Strategy')}\n\n"
+                     f"🤖 AI Generated Strategy:\n"
+                     f"- Description: {strategy_impl.get('description', 'AI-generated strategy')}\n"
+                     f"- Parameters: {json.dumps(strategy_impl.get('params', {}), indent=2)}\n\n"
+                     f"⚠️ Important:\n"
+                     f"- This is {mode.value.upper()} mode\n"
+                     f"- Monitor your trades regularly\n"
+                     f"- Use 'get_trading_status' to check performance\n"
+                     f"- Use 'stop_live_trading' to stop when needed\n\n"
+                     f"📊 Use session ID '{session_id}' to monitor this trading session."
+            )]
+            
+        except Exception as e:
+            logger.error(f"Error starting live trading: {str(e)}")
+            return [TextContent(type="text", text=f"Error starting live trading: {str(e)}")]
+    
+    async def _stop_live_trading(self, args: Dict[str, Any]) -> List[TextContent]:
+        """Stop live trading session"""
+        try:
+            session_id = args["session_id"]
+            
+            if session_id not in self.trading_sessions:
+                return [TextContent(type="text", text=f"Trading session {session_id} not found")]
+            
+            trading_engine = self.trading_sessions[session_id]
+            await trading_engine.stop()
+            
+            # Get final status
+            status = trading_engine.get_status()
+            
+            # Remove session
+            del self.trading_sessions[session_id]
+            
+            return [TextContent(
+                type="text",
+                text=f"🛑 Live Trading Stopped Successfully!\n\n"
+                     f"📋 Final Session Summary:\n"
+                     f"- Session ID: {session_id}\n"
+                     f"- Total Trades: {status.get('trades_today', 0)}\n"
+                     f"- Daily P&L: ${status.get('daily_pnl', 0):.2f}\n"
+                     f"- Open Positions: {status.get('positions', 0)}\n"
+                     f"- Pending Orders: {status.get('orders', 0)}\n\n"
+                     f"✅ All positions and orders have been handled according to your risk management settings."
+            )]
+            
+        except Exception as e:
+            logger.error(f"Error stopping live trading: {str(e)}")
+            return [TextContent(type="text", text=f"Error stopping live trading: {str(e)}")]
+    
+    async def _get_trading_status(self, args: Dict[str, Any]) -> List[TextContent]:
+        """Get current trading status"""
+        try:
+            session_id = args["session_id"]
+            
+            if session_id not in self.trading_sessions:
+                return [TextContent(type="text", text=f"Trading session {session_id} not found")]
+            
+            trading_engine = self.trading_sessions[session_id]
+            status = trading_engine.get_status()
+            
+            return [TextContent(
+                type="text",
+                text=f"📊 Live Trading Status Report\n\n"
+                     f"📋 Session: {session_id}\n"
+                     f"- State: {status.get('state', 'unknown').upper()}\n"
+                     f"- Symbols: {', '.join(status.get('symbols', []))}\n\n"
+                     f"📈 Performance:\n"
+                     f"- Daily P&L: ${status.get('daily_pnl', 0):.2f}\n"
+                     f"- Total Trades Today: {status.get('trades_today', 0)}\n\n"
+                     f"📊 Current Positions:\n"
+                     f"- Open Positions: {status.get('positions', 0)}\n"
+                     f"- Pending Orders: {status.get('orders', 0)}\n\n"
+                     f"🎯 Latest Signals:\n"
+                     f"{json.dumps(status.get('last_signals', {}), indent=2)}"
+            )]
+            
+        except Exception as e:
+            logger.error(f"Error getting trading status: {str(e)}")
+            return [TextContent(type="text", text=f"Error getting trading status: {str(e)}")]
+    
+    async def _get_account_info(self, args: Dict[str, Any]) -> List[TextContent]:
+        """Get MetaAPI account information"""
+        try:
+            async with MetaAPIClient() as client:
+                account_info = await client.get_account_info()
+                equity = await client.get_account_equity()
+                balance = await client.get_account_balance()
+                margin = await client.get_account_margin()
+                free_margin = await client.get_free_margin()
+                
+                positions = await client.get_positions()
+                orders = await client.get_orders()
+                
+                return [TextContent(
+                    type="text",
+                    text=f"💰 MetaAPI Account Information\n\n"
+                         f"📊 Account Details:\n"
+                         f"- Account ID: {account_info.get('login', 'N/A')}\n"
+                         f"- Server: {account_info.get('server', 'N/A')}\n"
+                         f"- Currency: {account_info.get('currency', 'N/A')}\n"
+                         f"- Leverage: {account_info.get('leverage', 'N/A')}\n\n"
+                         f"💵 Account Balance:\n"
+                         f"- Balance: ${balance:.2f}\n"
+                         f"- Equity: ${equity:.2f}\n"
+                         f"- Margin Used: ${margin:.2f}\n"
+                         f"- Free Margin: ${free_margin:.2f}\n\n"
+                         f"📈 Trading Status:\n"
+                         f"- Open Positions: {len(positions)}\n"
+                         f"- Pending Orders: {len(orders)}\n\n"
+                         f"📋 Positions:\n"
+                         f"{json.dumps([pos.to_dict() for pos in positions], indent=2)}"
+                )]
+                
+        except Exception as e:
+            logger.error(f"Error getting account info: {str(e)}")
+            return [TextContent(type="text", text=f"Error getting account info: {str(e)}")]
     
     async def run(self):
         """Run the MCP server"""
